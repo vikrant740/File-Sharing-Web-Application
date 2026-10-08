@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:latest
+    container_name: filedrop-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  # Node.js Signaling Server
+  backend:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: filedrop-backend
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - MONGO_URI=mongodb://mongodb:27017/filedrop
+      - CLIENT_URL=http://localhost
+      - NODE_ENV=production
+    depends_on:
+      - mongodb
+
+  # React Frontend (Nginx)
+  frontend:
+    build:
+      context: ./Frontend
+      dockerfile: Dockerfile
+    container_name: filedrop-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  mongo-data:
