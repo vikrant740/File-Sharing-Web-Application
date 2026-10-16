@@ -22,10 +22,21 @@ app.use(helmet({
   crossOriginResourcePolicy: false,
 }));
 
-// CORS Configuration
-const clientURL = process.env.CLIENT_URL || 'http://localhost:5173';
+// CORS Configuration (Allow both localhost and 127.0.0.1)
+const allowedOrigins = [
+  process.env.CLIENT_URL || 'http://localhost:5173',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173'
+];
+
 app.use(cors({
-  origin: clientURL,
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true); // Dev environment me allow karein
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true,
 }));
@@ -65,13 +76,17 @@ app.get('/api/turn-credentials', (req, res) => {
   res.status(200).json({ success: true, iceServers });
 });
 
-// Setup Socket.IO Server
+// Setup Socket.IO Server with Stable Transports
 const io = new Server(server, {
   cors: {
-    origin: clientURL,
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true,
   },
+  transports: ['polling', 'websocket'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 // Initialize Socket.io WebRTC & Room listeners
@@ -88,6 +103,6 @@ const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`===============================================`);
   console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📡 Ready for WebRTC connections from ${clientURL}`);
+  console.log(`📡 Ready for WebRTC connections`);
   console.log(`===============================================`);
 });

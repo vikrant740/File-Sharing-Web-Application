@@ -1,14 +1,12 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import io from 'socket.io-client';
+import { socket } from '../services/socket';
 import { aiAssistant } from '../services/aiAssistant';
 
 const WebRTCContext = createContext();
-const SOCKET_SERVER = 'http://localhost:5000';
 const CHUNK_SIZE = 64 * 1024; // 64 KB
 
 export function WebRTCProvider({ children }) {
-  const [socket, setSocket] = useState(null);
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] = useState(socket.connected);
   const [roomCode, setRoomCode] = useState(null);
   const [role, setRole] = useState(null);
   const [peers, setPeers] = useState([]);
@@ -29,28 +27,36 @@ export function WebRTCProvider({ children }) {
   const activeSenders = useRef(new Map());
 
   useEffect(() => {
-    const s = io(SOCKET_SERVER, {
-      transports: ['websocket', 'polling'],
-      autoConnect: true,
-      reconnection: true,
-    });
+    const handleConnect = () => setIsConnected(true);
+    const handleDisconnect = () => setIsConnected(false);
 
-    s.on('connect', () => setIsConnected(true));
-    s.on('disconnect', () => setIsConnected(false));
+    if (socket.connected) {
+      setIsConnected(true);
+    }
+
+    socket.on('connect', handleConnect);
+    socket.on('disconnect', handleDisconnect);
 
     // Self-destruct listener (One-time download)
-    s.on('room:self-destruct', ({ message }) => {
+    const handleSelfDestruct = ({ message }) => {
       alert(message || 'Room has self-destructed.');
       setRoomCode(null);
       setPeers([]);
-    });
+    };
 
-    s.on('room:role-updated', ({ peerId, role: newRole }) => {
+    const handleRoleUpdated = ({ peerId, role: newRole }) => {
       setPeers(prev => prev.map(p => p.id === peerId ? { ...p, role: newRole } : p));
-    });
+    };
 
-    setSocket(s);
-    return () => s.disconnect();
+    socket.on('room:self-destruct', handleSelfDestruct);
+    socket.on('room:role-updated', handleRoleUpdated);
+
+    return () => {
+      socket.off('connect', handleConnect);
+      socket.off('disconnect', handleDisconnect);
+      socket.off('room:self-destruct', handleSelfDestruct);
+      socket.off('room:role-updated', handleRoleUpdated);
+    };
   }, []);
 
   // WebRTC Setup
@@ -63,7 +69,7 @@ export function WebRTCProvider({ children }) {
     });
 
     pc.onicecandidate = (event) => {
-      if (event.candidate && socket) {
+      if (event.candidate && socket && socket.connected) {
         socket.emit('webrtc:ice-candidate', { targetId: peerId, candidate: event.candidate });
       }
     };
@@ -174,26 +180,24 @@ export function WebRTCProvider({ children }) {
 
     peerConnections.current.set(peerId, pc);
     return pc;
-  }, [socket, roomCode]);
+  }, [roomCode]);
 
   useEffect(() => {
-    if (!socket) return;
-
-    socket.on('webrtc:offer', async ({ senderId, offer }) => {
+    const handleOffer = async ({ senderId, offer }) => {
       let pc = peerConnections.current.get(senderId);
       if (!pc) pc = createPeerConnection(senderId, false);
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       socket.emit('webrtc:answer', { targetId: senderId, answer });
-    });
+    };
 
-    socket.on('webrtc:answer', async ({ senderId, answer }) => {
+    const handleAnswer = async ({ senderId, answer }) => {
       const pc = peerConnections.current.get(senderId);
       if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    });
+    };
 
-    socket.on('webrtc:ice-candidate', async ({ senderId, candidate }) => {
+    const handleIceCandidate = async ({ senderId, candidate }) => {
       const pc = peerConnections.current.get(senderId);
       if (pc && candidate) {
         try {
@@ -202,40 +206,47 @@ export function WebRTCProvider({ children }) {
           console.error(e);
         }
       }
-    });
+    };
 
-    socket.on('room:peer-joined', async (newPeer) => {
+    const handlePeerJoined = async (newPeer) => {
       setPeers(prev => [...prev.filter(p => p.id !== newPeer.id), newPeer]);
       const pc = createPeerConnection(newPeer.id, true);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit('webrtc:offer', { targetId: newPeer.id, offer });
-    });
+    };
 
-    socket.on('room:peer-left', ({ peerId }) => {
+    const handlePeerLeft = ({ peerId }) => {
       setPeers(prev => prev.filter(p => p.id !== peerId));
       if (peerConnections.current.has(peerId)) {
         peerConnections.current.get(peerId).close();
         peerConnections.current.delete(peerId);
       }
       dataChannels.current.delete(peerId);
-    });
+    };
 
-    socket.on('room:kicked', () => {
+    const handleKicked = () => {
       alert('You have been removed from the room.');
       setRoomCode(null);
       setPeers([]);
-    });
+    };
+
+    socket.on('webrtc:offer', handleOffer);
+    socket.on('webrtc:answer', handleAnswer);
+    socket.on('webrtc:ice-candidate', handleIceCandidate);
+    socket.on('room:peer-joined', handlePeerJoined);
+    socket.on('room:peer-left', handlePeerLeft);
+    socket.on('room:kicked', handleKicked);
 
     return () => {
-      socket.off('webrtc:offer');
-      socket.off('webrtc:answer');
-      socket.off('webrtc:ice-candidate');
-      socket.off('room:peer-joined');
-      socket.off('room:peer-left');
-      socket.off('room:kicked');
+      socket.off('webrtc:offer', handleOffer);
+      socket.off('webrtc:answer', handleAnswer);
+      socket.off('webrtc:ice-candidate', handleIceCandidate);
+      socket.off('room:peer-joined', handlePeerJoined);
+      socket.off('room:peer-left', handlePeerLeft);
+      socket.off('room:kicked', handleKicked);
     };
-  }, [socket, createPeerConnection]);
+  }, [createPeerConnection]);
 
   // Actions
   const createRoom = (options) => {
@@ -301,7 +312,6 @@ export function WebRTCProvider({ children }) {
       return alert('No peers connected yet! Share the room code to start.');
     }
 
-    // Role check: Viewer cannot upload
     if (role === 'Viewer') {
       return alert('Access Restricted: Viewers are only permitted to download files.');
     }
@@ -384,7 +394,6 @@ export function WebRTCProvider({ children }) {
             for (let i = 0; i < 16; i++) packet[i] = fileId.charCodeAt(i) || 32;
             packet.set(new Uint8Array(chunkBuffer), 16);
 
-            // Bandwidth throttling delay calculation
             let throttleDelay = 0;
             if (speedLimitMBps > 0) {
               const delayPerChunk = (CHUNK_SIZE / (speedLimitMBps * 1024 * 1024)) * 1000;
@@ -423,6 +432,7 @@ export function WebRTCProvider({ children }) {
 
   return (
     <WebRTCContext.Provider value={{
+      socket,
       isConnected,
       roomCode,
       role,
